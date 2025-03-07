@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
 import fiftyone as fo
+import fiftyone.core.storage as fos
 import fiftyone.operators as foo
 import fiftyone.operators.types as types
 
@@ -115,6 +116,7 @@ class ModelFineTuner(foo.Operator):
         # `epochs=epochs` might require more GPU time if large
         results = model.train(
             data=data_yaml,
+            save_dir="/home/mithrandir/Voxel51/",
             epochs=epochs,
             imgsz=640,
             name="finetuned",
@@ -216,16 +218,13 @@ def _copy_local_file(src, dst):
     Minimal local file copy. If your `dst` is a cloud path, you must
     implement your own upload logic via boto3, GCS library, etc.
     """
-    import shutil
-
     # If the user typed something like s3://..., you'd handle that differently
     if dst.startswith("s3://") or dst.startswith("gs://"):
+        fos.copy_files(src, dst)
+    else:
         raise NotImplementedError(
-            "For S3/GCS uploads, implement your desired storage logic here!"
+            "Encountered a path for which logic hasn't been implemented"
         )
-
-    shutil.copy(src, dst)
-
 
 def export_yolo_data(
     samples, 
