@@ -163,6 +163,7 @@ class ModelFineTuner(foo.Operator):
         # --- Step 3: Finetune YOLOv8 model with ultralytics ---
         # We'll re-init the model with the user-provided weights
         model = YOLO(local_weights_path)
+        model.to("cuda:0")
         # `train(...)` expects various kwargs. Adjust as you prefer.
         # `epochs=epochs` might require more GPU time if large
         results = model.train(
