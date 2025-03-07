@@ -3,17 +3,28 @@ from datetime import datetime
 import fiftyone as fo
 import fiftyone.operators as foo
 import fiftyone.operators.types as types
+import fiftyone.core.storage as fos
+
+#from ultralytics import YOLO
+
+
+TRAIN_ROOT = '/tmp/yolo_train'
+MODEL_ROOT = os.path.join(TRAIN_ROOT, 'models')
+DATA_ROOT = os.path.join(TRAIN_ROOT, 'data')
+PROJECT_ROOT = os.path.join(TRAIN_ROOT, 'projects')
+
+
 
 #
 # We assume you have ultralytics installed
 #
-try:
-    from ultralytics import YOLO
-except ImportError:
-    raise ImportError(
-        "You must install ultralytics to use this plugin. "
-        "Add `ultralytics` to your plugin's requirements.txt."
-    )
+#try:
+#    from ultralytics import YOLO
+#except ImportError:
+#    raise ImportError(
+#        "You must install ultralytics to use this plugin. "
+#        "Add `ultralytics` to your plugin's requirements.txt."
+#    )
 
 
 class ModelFineTuner(foo.Operator):
@@ -54,10 +65,27 @@ class ModelFineTuner(foo.Operator):
         """
         inputs = types.Object()
 
+
+        dataset = ctx.dataset
+        schema = dataset.get_field_schema(ftype=fo.EmbeddedDocumentField,
+                                          embedded_doc_type=fo.Detections)
+        fields = schema.keys()
+        field_choices = types.DropdownView()
+        for field_name in fields:
+            field_choices.add_choice(field_name, label=field_name)
+
+        inputs.enum(
+            'det_field',
+            field_choices.values(),
+            required=True,
+            label='detections field',
+            view=field_choices,
+        )
+
         # 1) Local filepath to existing YOLOv8 model weights
         inputs.str(
-            "local_weights_path",
-            default='/home/mithrandir/Voxel51/yolov8n.pt',
+            "weights_path",
+            default='gs://voxel51-test/al/yolo/yolov8n.pt',
             required=True,
             description="Local filepath to the YOLOv8 *.pt weights file",
             label="Local YOLOv8 weights",
@@ -66,7 +94,7 @@ class ModelFineTuner(foo.Operator):
         # 2) Path to store the new finetuned model weights (S3/GCS/whatever)
         inputs.str(
             "export_uri",
-            default='s3://foo/bar',
+            default='gs://voxel51-test/al/yolo/yolov8n_finetuned.pt',
             required=True,
             description="S3 or GCS path (or local) to save finetuned weights, e.g. s3://mybucket/finetuned.pt",
             label="Finetuned weights output URI",
@@ -88,25 +116,49 @@ class ModelFineTuner(foo.Operator):
     def execute(self, ctx):
         """
         Main logic that:
-        - Checks that `local_weights_path` is a YOLOv8 model
+        - Checks that `weights_path` is a YOLOv8 model
         - Exports the current view to YOLO dataset format
         - Runs YOLOv8 training
         - Saves best weights to user-supplied `export_uri`
         """
-        local_weights_path = ctx.params["local_weights_path"]
+        
+        from ultralytics import YOLO
+
+        det_field = ctx.params["det_field"]
+        weights_path = ctx.params["weights_path"]
         export_uri = ctx.params["export_uri"]
         epochs = ctx.params["epochs"]
-        classes = ['bird']
+        
+        dataset = ctx.dataset
+        det_label_field = f'{det_field}.detections.label'
+        classes = dataset.distinct(det_label_field)
 
-        # --- Step 1: Verify the local_weights_path is YOLOv8 ---
-        model = self._try_load_model(local_weights_path)
+        # --- Step 1: Verify the weights_path is YOLOv8 ---
+        local_weights_path = os.path.join(MODEL_ROOT, os.path.basename(weights_path))
+        fos.copy_file(weights_path, local_weights_path)
+        #model = self._try_load_model(local_weights_path)
+        str = f'Model downloaded to: {local_weights_path}'
+        ctx.log(str)
+        print(str)
 
-        export_yolo_data(ctx.dataset, "/home/mithrandir/Voxel51/birds_train", classes=classes, split=["train", "val"])
+        dataset_root = os.path.join(DATA_ROOT, dataset.name)
+        fos.ensure_dir(dataset_root)
+        str = f'Exporting to: {dataset_root}'
+        ctx.log(str)
+        print(str)
+       
+        export_yolo_data(ctx.dataset, 
+                         dataset_root,
+                         classes=classes, 
+                         label_field=det_field,
+                         split=["train", "val"])
 
         # The dataset.yaml that YOLO wants is typically `export_dir/dataset.yaml`
-        data_yaml = "/home/mithrandir/Voxel51/birds_train/dataset.yaml"
+        data_yaml = f"{dataset_root}/dataset.yaml"
+        assert fos.exists(data_yaml), f"Failed to export dataset to {data_yaml}"
 
-        ctx.set_progress(progress=0.1, label="Dataset exported. Starting training...")
+        print("Starting training")
+        #ctx.set_progress(progress=0.1, label="Dataset exported. Starting training...")
 
         # --- Step 3: Finetune YOLOv8 model with ultralytics ---
         # We'll re-init the model with the user-provided weights
@@ -118,6 +170,7 @@ class ModelFineTuner(foo.Operator):
             epochs=epochs,
             imgsz=640,
             name="finetuned",
+            project=PROJECT_ROOT,
             exist_ok=True,
         )
 
@@ -128,14 +181,18 @@ class ModelFineTuner(foo.Operator):
         # `results.save_dir` is the folder YOLO used for the last run
         best_weights = os.path.join(results.save_dir, "weights", "best.pt")
 
-        ctx.set_progress(progress=0.9, label="Training complete. Saving final weights...")
+        print("Endg training")
+
+        #ctx.set_progress(progress=0.9, label="Training complete. Saving final weights...")
 
         # --- Step 4: Save to user-supplied path (export_uri) ---
         # If `export_uri` is on local disk, we can just copy. If it’s S3 or GCS,
         # you might need a custom storage library. For simplicity, below is a naive local example:
-        _copy_local_file(best_weights, export_uri)
+        fos.copy_file(best_weights, export_uri)
+        
+        print(f"Saved finetuned weights to {export_uri}")
 
-        ctx.set_progress(progress=1.0, label="Done!")
+        #ctx.set_progress(progress=1.0, label="Done!")
         return {
             "finetuned_weights_path": export_uri,
             "status": "success",
@@ -159,6 +216,7 @@ class ModelFineTuner(foo.Operator):
             view=types.View(label="Finetune Results"),
         )
 
+    '''
     def _try_load_model(self, weights_path):
         """
         Helper that attempts to load YOLO weights using ultralytics.
@@ -174,6 +232,7 @@ class ModelFineTuner(foo.Operator):
                 f"Error: {e}"
             )
         return True
+    '''
 
 
 def register(plugin):
@@ -187,7 +246,7 @@ def register(plugin):
 #Helper functions referenced above. 
 # 
 
-def _export_view_to_yolo(view, export_dir):
+def _export_view_to_yolo(view, label_field, export_dir):
     """
     Example minimal YOLO export using FiftyOne's built-in YOLO v5/v8 exporter.
     The user is responsible for ensuring that the dataset has bounding boxes
@@ -201,7 +260,7 @@ def _export_view_to_yolo(view, export_dir):
     #
     # For brevity, let’s assume your ground-truth bounding boxes are
     # in a field named "ground_truth", and all classes are relevant:
-    label_field = "ground_truth"
+    #label_field = "ground_truth"
 
     view.export(
         export_dir=export_dir,
@@ -211,6 +270,7 @@ def _export_view_to_yolo(view, export_dir):
     )
 
 
+'''
 def _copy_local_file(src, dst):
     """
     Minimal local file copy. If your `dst` is a cloud path, you must
@@ -225,7 +285,7 @@ def _copy_local_file(src, dst):
         )
 
     shutil.copy(src, dst)
-
+'''
 
 def export_yolo_data(
     samples, 
