@@ -1,12 +1,10 @@
 import os
 from datetime import datetime
+import torch
 import fiftyone as fo
-import fiftyone.core.storage as fos
 import fiftyone.operators as foo
 import fiftyone.operators.types as types
 import fiftyone.core.storage as fos
-
-#from ultralytics import YOLO
 
 
 TRAIN_ROOT = '/tmp/yolo_train'
@@ -86,27 +84,52 @@ class ModelFineTuner(foo.Operator):
         # 1) Local filepath to existing YOLOv8 model weights
         inputs.str(
             "weights_path",
-            default='gs://voxel51-test/al/yolo/yolov8n.pt',
+            default='gs://voxel51-demo-fiftyone-ai/yolo/yolov8n.pt',
             required=True,
             description="Local filepath to the YOLOv8 *.pt weights file",
             label="Local YOLOv8 weights",
         )
 
-        # 2) Path to store the new finetuned model weights (S3/GCS/whatever)
+        # 2) Choice to export to CoreML
+        inputs.bool(
+            "to_coreml",
+            label='Check to export as a CoreML model',
+            view=types.CheckboxView(),
+        )
+
+        # 3) Path to store the new finetuned model weights (S3/GCS/whatever)
         inputs.str(
             "export_uri",
-            default='gs://voxel51-test/al/yolo/yolov8n_finetuned.pt',
+            default='gs://voxel51-demo-fiftyone-ai/yolo/yolov8n_finetuned.pt',
             required=True,
             description="S3 or GCS path (or local) to save finetuned weights, e.g. s3://mybucket/finetuned.pt",
             label="Finetuned weights output URI",
         )
 
-        # 3) Can add more hyperparameters here
+        # 4) Path to store CoreML model
+        inputs.str(
+            "core_ml_export_uri",
+            default='gs://voxel51-test/al/yolo/yolov8n_finetuned.mlpackage',
+            required=False,
+            description="S3 or GCS path (or local) to save finetuned CoreML weights",
+            label="Finetuned weights (CoreML format) output URI",
+        )
+
+        # 5) Can add more hyperparameters here
         inputs.int(
             "epochs",
             default=1,
             description="Number of epochs to train",
             label="Training epochs",
+        )
+
+        # 6) CUDA target device
+        inputs.int(
+            "target_device_index",
+            default='0',
+            required=False,
+            description='CUDA Device number to train on. Optional, defaults to device cuda:0',
+            label="Target CUDA device number"
         )
 
         return types.Property(
@@ -129,6 +152,12 @@ class ModelFineTuner(foo.Operator):
         weights_path = ctx.params["weights_path"]
         export_uri = ctx.params["export_uri"]
         epochs = ctx.params["epochs"]
+        target_device_index = ctx.params["target_device_index"]
+        to_coreml = ctx.params["to_coreml"]
+        core_ml_export_uri = ctx.params["core_ml_export_uri"]
+
+
+        
         
         dataset = ctx.dataset
         det_label_field = f'{det_field}.detections.label'
@@ -164,12 +193,20 @@ class ModelFineTuner(foo.Operator):
         # --- Step 3: Finetune YOLOv8 model with ultralytics ---
         # We'll re-init the model with the user-provided weights
         model = YOLO(local_weights_path)
-        model.to("cuda:0")
+        
+        cuda_device_count = torch.cuda.device_count()
+        ctx.log(f"Number of CUDA devices found: {cuda_device_count}")
+        
+        if cuda_device_count > 1 and target_device_index <= cuda_device_count:
+            target_device = f"cuda:{target_device_index}"
+            model.to(target_device)
+        else:
+            model.to("cuda:0")
+
         # `train(...)` expects various kwargs. Adjust as you prefer.
         # `epochs=epochs` might require more GPU time if large
         results = model.train(
             data=data_yaml,
-            save_dir="/home/mithrandir/Voxel51/",
             epochs=epochs,
             imgsz=640,
             name="finetuned",
@@ -184,7 +221,7 @@ class ModelFineTuner(foo.Operator):
         # `results.save_dir` is the folder YOLO used for the last run
         best_weights = os.path.join(results.save_dir, "weights", "best.pt")
 
-        print("Endg training")
+        print("Ending training")
 
         #ctx.set_progress(progress=0.9, label="Training complete. Saving final weights...")
 
@@ -194,6 +231,16 @@ class ModelFineTuner(foo.Operator):
         fos.copy_file(best_weights, export_uri)
         
         print(f"Saved finetuned weights to {export_uri}")
+
+        if to_coreml:
+            coreml_path = os.path.join(MODEL_ROOT, 'yolov8n.mlpackage')
+            try:
+                model.export(format="coreml", nms=True)
+                fos.copy_file(coreml_path, core_ml_export_uri)
+            except Exception as E:
+                ctx.log(E)
+            
+
 
         #ctx.set_progress(progress=1.0, label="Done!")
         return {
