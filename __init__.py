@@ -105,14 +105,14 @@ class ModelFineTuner(foo.Operator):
             description="S3 or GCS path (or local) to save finetuned weights, e.g. s3://mybucket/finetuned.pt",
             label="Finetuned weights output URI",
         )
-
+        
         # 4) Path to store CoreML model
         inputs.str(
             "core_ml_export_uri",
-            default='gs://voxel51-test/al/yolo/yolov8n_finetuned.mlpackage',
+            default='gs://voxel51-demo-fiftyone-ai/yolo/yolov8n_finetuned.mlpackage',
             required=False,
             description="S3 or GCS path (or local) to save finetuned CoreML weights",
-            label="Finetuned weights (CoreML format) output URI",
+            label="(Optional) Finetuned weights (CoreML format) output URI",
         )
 
         # 5) Can add more hyperparameters here
@@ -126,7 +126,7 @@ class ModelFineTuner(foo.Operator):
         # 6) CUDA target device
         inputs.int(
             "target_device_index",
-            default='0',
+            default=0,
             required=False,
             description='CUDA Device number to train on. Optional, defaults to device cuda:0',
             label="Target CUDA device number"
@@ -237,8 +237,9 @@ class ModelFineTuner(foo.Operator):
             try:
                 model.export(format="coreml", nms=True)
                 fos.copy_file(coreml_path, core_ml_export_uri)
-            except Exception as E:
-                ctx.log(E)
+            except ModuleNotFoundError as MNFE:
+                ctx.log(f"{MNFE}")
+                
             
 
 
@@ -246,6 +247,7 @@ class ModelFineTuner(foo.Operator):
         return {
             "finetuned_weights_path": export_uri,
             "status": "success",
+            "cuda_device_count": cuda_device_count
         }
 
     def resolve_output(self, ctx):
@@ -260,6 +262,11 @@ class ModelFineTuner(foo.Operator):
         outputs.str(
             "status",
             label="Finetuning status",
+        )
+
+        outputs.str(
+            "cuda_device_count",
+            label="Number of CUDA devices"
         )
         return types.Property(
             outputs,
