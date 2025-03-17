@@ -151,7 +151,7 @@ class ModelFineTuner2(foo.Operator):
         export_uri = ctx.params["export_uri"]
         epochs = ctx.params["epochs"]
         target_device_index = ctx.params["target_device_index"]
-        to_coreml = ctx.params.get("to_coreml",False)
+        to_coreml = ctx.params.get("to_coreml", False)
         core_ml_export_uri = ctx.params["core_ml_export_uri"]
 
         dataset = ctx.dataset
@@ -166,12 +166,11 @@ class ModelFineTuner2(foo.Operator):
         logger.warning(str)
 
         dataset_root = os.path.join(DATA_ROOT, dataset.name)
+        now_time = datetime.now().strftime("%Y%m%dT%H%M%S")
         export_dir = os.path.join(dataset_root, now_time)
-        fos.ensure_dir(export_dir)
         str = f"Exporting to: {export_dir}"
         logger.warning(str)
 
-        now_time = datetime.now().strftime("%Y%m%dT%H%M%S")
         export_yolo_data(
             ctx.dataset,
             export_dir,
@@ -266,11 +265,131 @@ class ModelFineTuner2(foo.Operator):
         )
 
 
+class ApplyRemoteModel2(foo.Operator):
+    @property
+    def config(self):
+        """
+        Defines how the FiftyOne App should display this operator (name,
+        label, whether it shows in the operator browser, etc).
+        """
+        return foo.OperatorConfig(
+            name="apply-remote-model-2",  # Must match what's in fiftyone.yml
+            label="Run YOLO model with cloud-backed weights",
+            description="Run inference with a YOLOv8 model on the current view using remotely stored weights",
+            icon="input",  # Material UI icon, or path to custom icon
+            allow_immediate_execution=True,
+            allow_delegated_execution=True,
+            default_choice_to_delegated=True,
+        )
+
+    def resolve_placement(self, ctx):
+        """
+        Optional convenience: place a button in the App so the user can
+        click to open this operator's input form.
+        """
+        return types.Placement(
+            types.Places.SAMPLES_GRID_SECONDARY_ACTIONS,
+            types.Button(
+                label="Apply YOLO model",
+                icon="input",
+                prompt=True,  # always show the operator's input prompt
+            ),
+        )
+
+    def resolve_input(self, ctx):
+        """
+        Collect the inputs we need from the user. This defines the form
+        that appears in the FiftyOne App when the operator is invoked.
+        """
+        inputs = types.Object()
+
+        inputs.str(
+            "det_field",
+            required=True,
+            label="Detections field",
+        )
+
+        # 1) Local filepath to existing YOLOv8 model weights
+        inputs.str(
+            "weights_path",
+            default="gs://voxel51-demo-fiftyone-ai/yolo/yolov8n_finetuned.pt",
+            required=True,
+            description="Filepath to the YOLOv8 *.pt weights file",
+            label="YOLOv8 weights",
+        )
+
+        # 2) CUDA target device
+        inputs.int(
+            "target_device_index",
+            default=0,
+            required=False,
+            description="CUDA Device number to train on. Optional, defaults to device cuda:0",
+            label="Target CUDA device number",
+        )
+
+        return types.Property(
+            inputs,
+            view=types.View(label="Run inference YOLOv8"),
+        )
+
+    def execute(self, ctx):
+        """ """
+
+        from ultralytics import YOLO
+
+        det_field = ctx.params["det_field"]
+        weights_path = ctx.params["weights_path"]
+        target_device_index = ctx.params["target_device_index"]
+
+        dataset = ctx.dataset
+
+        # --- Step 1: Verify the weights_path is YOLOv8 ---
+        local_weights_path = os.path.join(MODEL_ROOT, os.path.basename(weights_path))
+        fos.copy_file(weights_path, local_weights_path)
+        # model = self._try_load_model(local_weights_path)
+        str = f"Model downloaded to: {local_weights_path}"
+        logger.warning(str)
+
+        cuda_device_count = torch.cuda.device_count()
+        logger.warning(f"Number of CUDA devices found: {cuda_device_count}")
+
+        model = YOLO(local_weights_path)
+
+        if cuda_device_count > 1 and target_device_index <= cuda_device_count:
+            target_device = f"cuda:{target_device_index}"
+            model.to(target_device)
+        else:
+            model.to("cuda:0")
+
+        ctx.dataset.apply_model(model, label_field=det_field)
+
+        logger.warning("Ending inference")
+
+        return {"status": "success", "cuda_device_count": cuda_device_count}
+
+    def resolve_output(self, ctx):
+        """
+        Display any final outputs in the App after training completes.
+        """
+        outputs = types.Object()
+        outputs.str(
+            "status",
+            label="Finetuning status",
+        )
+
+        outputs.str("cuda_device_count", label="Number of CUDA devices")
+        return types.Property(
+            outputs,
+            view=types.View(label="Finetune Results"),
+        )
+
+
 def register(plugin):
     """
     Called by FiftyOne to discover and register your plugin’s operators/panels.
     """
     plugin.register(ModelFineTuner2)
+    plugin.register(ApplyRemoteModel2)
 
 
 #

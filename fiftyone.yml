@@ -7,3 +7,4 @@ fiftyone:
 
 operators:
   - model-fine-tuner-2
+  - apply-remote-model-2
