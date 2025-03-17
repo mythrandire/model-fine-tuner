@@ -1,4 +1,4 @@
-name: "@mythrandire/model-fine-tuner"
+name: "@mythrandire/model-fine-tuner-2"
 type: plugin
 version: "1.0.0"
 description: "A Python-only plugin to finetune YOLOv8 models on the current FiftyOne view"
@@ -6,4 +6,4 @@ fiftyone:
   version: ">=1.2.0"
 
 operators:
-  - model-fine-tuner
+  - model-fine-tuner-2
