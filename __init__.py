@@ -1,32 +1,29 @@
+import sys
 import os
 from datetime import datetime
+import logging
 import torch
 import fiftyone as fo
 import fiftyone.operators as foo
 import fiftyone.operators.types as types
 import fiftyone.core.storage as fos
 
-
-TRAIN_ROOT = '/tmp/yolo_train'
-MODEL_ROOT = os.path.join(TRAIN_ROOT, 'models')
-DATA_ROOT = os.path.join(TRAIN_ROOT, 'data')
-PROJECT_ROOT = os.path.join(TRAIN_ROOT, 'projects')
+logger = logging.getLogger("fiftyone.core.collections")
 
 
+""" 
+This plugin is a simple example of how to finetune YOLOv8 object detection
+model using FiftyOne Teams.
+"""
 
-#
-# We assume you have ultralytics installed
-#
-#try:
-#    from ultralytics import YOLO
-#except ImportError:
-#    raise ImportError(
-#        "You must install ultralytics to use this plugin. "
-#        "Add `ultralytics` to your plugin's requirements.txt."
-#    )
+# Set to writable working dir in teams-do pods
+TRAIN_ROOT = "/tmp/yolo/"
+MODEL_ROOT = os.path.join(TRAIN_ROOT, "models")
+DATA_ROOT = os.path.join(TRAIN_ROOT, "data")
+PROJECT_ROOT = os.path.join(TRAIN_ROOT, "projects")
 
 
-class ModelFineTuner(foo.Operator):
+class ModelFineTuner2(foo.Operator):
     @property
     def config(self):
         """
@@ -34,13 +31,13 @@ class ModelFineTuner(foo.Operator):
         label, whether it shows in the operator browser, etc).
         """
         return foo.OperatorConfig(
-            name="model-fine-tuner",  # Must match what's in fiftyone.yml
+            name="model-fine-tuner-2",  # Must match what's in fiftyone.yml
             label="Finetune models like YOLOv8",
             description="Finetune a YOLOv8 model on the current view",
-            icon="build_circle",           # Material UI icon, or path to custom icon
-            allow_immediate_execution=True,
+            icon="build_circle",  # Material UI icon, or path to custom icon
+            allow_immediate_execution=True,  # AL: maybe should be false
             allow_delegated_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,  # AL: prob should be true
         )
 
     def resolve_placement(self, ctx):
@@ -64,52 +61,53 @@ class ModelFineTuner(foo.Operator):
         """
         inputs = types.Object()
 
-
         dataset = ctx.dataset
-        schema = dataset.get_field_schema(ftype=fo.EmbeddedDocumentField,
-                                          embedded_doc_type=fo.Detections)
+        schema = dataset.get_field_schema(
+            ftype=fo.EmbeddedDocumentField, embedded_doc_type=fo.Detections
+        )
         fields = schema.keys()
         field_choices = types.DropdownView()
         for field_name in fields:
             field_choices.add_choice(field_name, label=field_name)
 
         inputs.enum(
-            'det_field',
+            "det_field",
             field_choices.values(),
             required=True,
-            label='detections field',
+            label="detections field",
             view=field_choices,
         )
 
-        # 1) Local filepath to existing YOLOv8 model weights
+        # 1) Path to existing YOLOv8 model weights (local or cloud)
         inputs.str(
             "weights_path",
-            default='gs://voxel51-demo-fiftyone-ai/yolo/yolov8n.pt',
+            default="gs://voxel51-demo-fiftyone-ai/yolo/yolov8n.pt",
             required=True,
-            description="Local filepath to the YOLOv8 *.pt weights file",
-            label="Local YOLOv8 weights",
+            description="S3 or GCS path (or local) to initial YOLOv8 *.pt weights",
+            label="Initial weights input URI",
         )
 
         # 2) Choice to export to CoreML
         inputs.bool(
             "to_coreml",
-            label='Check to export as a CoreML model',
+            label="Check to export as a CoreML model",
             view=types.CheckboxView(),
+            default=False,
         )
 
-        # 3) Path to store the new finetuned model weights (S3/GCS/whatever)
+        # 3) Path to store the new finetuned model weights (local or cloud)
         inputs.str(
             "export_uri",
-            default='gs://voxel51-demo-fiftyone-ai/yolo/yolov8n_finetuned.pt',
+            default="gs://voxel51-demo-fiftyone-ai/yolo/yolov8n_finetuned.pt",
             required=True,
-            description="S3 or GCS path (or local) to save finetuned weights, e.g. s3://mybucket/finetuned.pt",
+            description="S3 or GCS path (or local) to save finetuned weights",
             label="Finetuned weights output URI",
         )
-        
+
         # 4) Path to store CoreML model
         inputs.str(
             "core_ml_export_uri",
-            default='gs://voxel51-demo-fiftyone-ai/yolo/yolov8n_finetuned.mlpackage',
+            default="gs://voxel51-demo-fiftyone-ai/yolo/yolov8n_finetuned.mlpackage",
             required=False,
             description="S3 or GCS path (or local) to save finetuned CoreML weights",
             label="(Optional) Finetuned weights (CoreML format) output URI",
@@ -128,8 +126,8 @@ class ModelFineTuner(foo.Operator):
             "target_device_index",
             default=0,
             required=False,
-            description='CUDA Device number to train on. Optional, defaults to device cuda:0',
-            label="Target CUDA device number"
+            description="CUDA Device number to train on. Optional, defaults to device cuda:0",
+            label="Target CUDA device number",
         )
 
         return types.Property(
@@ -145,7 +143,7 @@ class ModelFineTuner(foo.Operator):
         - Runs YOLOv8 training
         - Saves best weights to user-supplied `export_uri`
         """
-        
+
         from ultralytics import YOLO
 
         det_field = ctx.params["det_field"]
@@ -153,50 +151,48 @@ class ModelFineTuner(foo.Operator):
         export_uri = ctx.params["export_uri"]
         epochs = ctx.params["epochs"]
         target_device_index = ctx.params["target_device_index"]
-        to_coreml = ctx.params["to_coreml"]
+        to_coreml = ctx.params.get("to_coreml", False)
         core_ml_export_uri = ctx.params["core_ml_export_uri"]
 
-
-        
-        
         dataset = ctx.dataset
-        det_label_field = f'{det_field}.detections.label'
+        det_label_field = f"{det_field}.detections.label"
         classes = dataset.distinct(det_label_field)
 
         # --- Step 1: Verify the weights_path is YOLOv8 ---
         local_weights_path = os.path.join(MODEL_ROOT, os.path.basename(weights_path))
         fos.copy_file(weights_path, local_weights_path)
-        #model = self._try_load_model(local_weights_path)
-        str = f'Model downloaded to: {local_weights_path}'
-        ctx.log(str)
-        print(str)
+        # model = self._try_load_model(local_weights_path)
+        str = f"Model downloaded to: {local_weights_path}"
+        logger.warning(str)
 
         dataset_root = os.path.join(DATA_ROOT, dataset.name)
-        fos.ensure_dir(dataset_root)
-        str = f'Exporting to: {dataset_root}'
-        ctx.log(str)
-        print(str)
-       
-        export_yolo_data(ctx.dataset, 
-                         dataset_root,
-                         classes=classes, 
-                         label_field=det_field,
-                         split=["train", "val"])
+        now_time = datetime.now().strftime("%Y%m%dT%H%M%S")
+        export_dir = os.path.join(dataset_root, now_time)
+        str = f"Exporting to: {export_dir}"
+        logger.warning(str)
+
+        export_yolo_data(
+            ctx.dataset,
+            export_dir,
+            classes=classes,
+            label_field=det_field,
+            split=["train", "val"],
+        )
 
         # The dataset.yaml that YOLO wants is typically `export_dir/dataset.yaml`
-        data_yaml = f"{dataset_root}/dataset.yaml"
+        data_yaml = f"{export_dir}/dataset.yaml"
         assert fos.exists(data_yaml), f"Failed to export dataset to {data_yaml}"
 
-        print("Starting training")
-        #ctx.set_progress(progress=0.1, label="Dataset exported. Starting training...")
+        logger.warning("Starting training")
+        ctx.set_progress(progress=0.1, label="Dataset exported. Starting training...")
 
         # --- Step 3: Finetune YOLOv8 model with ultralytics ---
         # We'll re-init the model with the user-provided weights
         model = YOLO(local_weights_path)
-        
+
         cuda_device_count = torch.cuda.device_count()
-        ctx.log(f"Number of CUDA devices found: {cuda_device_count}")
-        
+        logger.warning(f"Number of CUDA devices found: {cuda_device_count}")
+
         if cuda_device_count > 1 and target_device_index <= cuda_device_count:
             target_device = f"cuda:{target_device_index}"
             model.to(target_device)
@@ -221,33 +217,31 @@ class ModelFineTuner(foo.Operator):
         # `results.save_dir` is the folder YOLO used for the last run
         best_weights = os.path.join(results.save_dir, "weights", "best.pt")
 
-        print("Ending training")
+        logger.warning("Ending training")
 
-        #ctx.set_progress(progress=0.9, label="Training complete. Saving final weights...")
+        ctx.set_progress(
+            progress=0.9, label="Training complete. Saving final weights..."
+        )
 
         # --- Step 4: Save to user-supplied path (export_uri) ---
         # If `export_uri` is on local disk, we can just copy. If it’s S3 or GCS,
         # you might need a custom storage library. For simplicity, below is a naive local example:
         fos.copy_file(best_weights, export_uri)
-        
-        print(f"Saved finetuned weights to {export_uri}")
+        logger.warning(f"Saved finetuned weights to {export_uri}")
 
         if to_coreml:
-            coreml_path = os.path.join(MODEL_ROOT, 'yolov8n.mlpackage')
+            coreml_path = os.path.join(MODEL_ROOT, "yolov8n.mlpackage")
             try:
                 model.export(format="coreml", nms=True)
                 fos.copy_file(coreml_path, core_ml_export_uri)
             except ModuleNotFoundError as MNFE:
                 ctx.log(f"{MNFE}")
-                
-            
 
-
-        #ctx.set_progress(progress=1.0, label="Done!")
+        # ctx.set_progress(progress=1.0, label="Done!")
         return {
             "finetuned_weights_path": export_uri,
             "status": "success",
-            "cuda_device_count": cuda_device_count
+            "cuda_device_count": cuda_device_count,
         }
 
     def resolve_output(self, ctx):
@@ -264,104 +258,153 @@ class ModelFineTuner(foo.Operator):
             label="Finetuning status",
         )
 
-        outputs.str(
-            "cuda_device_count",
-            label="Number of CUDA devices"
-        )
+        outputs.str("cuda_device_count", label="Number of CUDA devices")
         return types.Property(
             outputs,
             view=types.View(label="Finetune Results"),
         )
 
-    '''
-    def _try_load_model(self, weights_path):
+
+class ApplyRemoteModel2(foo.Operator):
+    @property
+    def config(self):
         """
-        Helper that attempts to load YOLO weights using ultralytics.
-        If load fails or if the model is not YOLOv8, we raise an error.
+        Defines how the FiftyOne App should display this operator (name,
+        label, whether it shows in the operator browser, etc).
         """
-        try:
-            # If `YOLO(...)` can parse it, we’ll assume it’s YOLOv8
-            _ = YOLO(weights_path)
-        except Exception as e:
-            raise ValueError(
-                f"Failed to load model from {weights_path}. "
-                "Ensure this is a valid YOLOv8 .pt file. "
-                f"Error: {e}"
-            )
-        return True
-    '''
+        return foo.OperatorConfig(
+            name="apply-remote-model-2",  # Must match what's in fiftyone.yml
+            label="Run YOLO model with cloud-backed weights",
+            description="Run inference with a YOLOv8 model on the current view using remotely stored weights",
+            icon="input",  # Material UI icon, or path to custom icon
+            allow_immediate_execution=True,
+            allow_delegated_execution=True,
+            default_choice_to_delegated=True,
+        )
+
+    def resolve_placement(self, ctx):
+        """
+        Optional convenience: place a button in the App so the user can
+        click to open this operator's input form.
+        """
+        return types.Placement(
+            types.Places.SAMPLES_GRID_SECONDARY_ACTIONS,
+            types.Button(
+                label="Apply YOLO model",
+                icon="input",
+                prompt=True,  # always show the operator's input prompt
+            ),
+        )
+
+    def resolve_input(self, ctx):
+        """
+        Collect the inputs we need from the user. This defines the form
+        that appears in the FiftyOne App when the operator is invoked.
+        """
+        inputs = types.Object()
+
+        inputs.str(
+            "det_field",
+            required=True,
+            label="Detections field",
+        )
+
+        # 1) Local filepath to existing YOLOv8 model weights
+        inputs.str(
+            "weights_path",
+            default="gs://voxel51-demo-fiftyone-ai/yolo/yolov8n_finetuned.pt",
+            required=True,
+            description="Filepath to the YOLOv8 *.pt weights file",
+            label="YOLOv8 weights",
+        )
+
+        # 2) CUDA target device
+        inputs.int(
+            "target_device_index",
+            default=0,
+            required=False,
+            description="CUDA Device number to train on. Optional, defaults to device cuda:0",
+            label="Target CUDA device number",
+        )
+
+        return types.Property(
+            inputs,
+            view=types.View(label="Run inference YOLOv8"),
+        )
+
+    def execute(self, ctx):
+        """ """
+
+        from ultralytics import YOLO
+
+        det_field = ctx.params["det_field"]
+        weights_path = ctx.params["weights_path"]
+        target_device_index = ctx.params["target_device_index"]
+
+        dataset = ctx.dataset
+
+        # --- Step 1: Verify the weights_path is YOLOv8 ---
+        local_weights_path = os.path.join(MODEL_ROOT, os.path.basename(weights_path))
+        fos.copy_file(weights_path, local_weights_path)
+        # model = self._try_load_model(local_weights_path)
+        str = f"Model downloaded to: {local_weights_path}"
+        logger.warning(str)
+
+        cuda_device_count = torch.cuda.device_count()
+        logger.warning(f"Number of CUDA devices found: {cuda_device_count}")
+
+        model = YOLO(local_weights_path)
+
+        if cuda_device_count > 1 and target_device_index <= cuda_device_count:
+            target_device = f"cuda:{target_device_index}"
+            model.to(target_device)
+        else:
+            model.to("cuda:0")
+
+        ctx.dataset.apply_model(model, label_field=det_field)
+
+        logger.warning("Ending inference")
+
+        return {"status": "success", "cuda_device_count": cuda_device_count}
+
+    def resolve_output(self, ctx):
+        """
+        Display any final outputs in the App after training completes.
+        """
+        outputs = types.Object()
+        outputs.str(
+            "status",
+            label="Finetuning status",
+        )
+
+        outputs.str("cuda_device_count", label="Number of CUDA devices")
+        return types.Property(
+            outputs,
+            view=types.View(label="Finetune Results"),
+        )
 
 
 def register(plugin):
     """
     Called by FiftyOne to discover and register your plugin’s operators/panels.
     """
-    plugin.register(ModelFineTuner)
+    plugin.register(ModelFineTuner2)
+    plugin.register(ApplyRemoteModel2)
 
 
 #
-#Helper functions referenced above. 
-# 
+# Helper functions referenced above.
+#
 
-def _export_view_to_yolo(view, label_field, export_dir):
-    """
-    Example minimal YOLO export using FiftyOne's built-in YOLO v5/v8 exporter.
-    The user is responsible for ensuring that the dataset has bounding boxes
-    or relevant labels that YOLO supports.
-    """
-    # We must specify label_field(s) containing the object detections
-    # and the classes (if relevant).
-    #
-    # If your dataset has multiple detection fields, or if you want
-    # specific classes only, adapt as you wish.
-    #
-    # For brevity, let’s assume your ground-truth bounding boxes are
-    # in a field named "ground_truth", and all classes are relevant:
-    #label_field = "ground_truth"
-
-    view.export(
-        export_dir=export_dir,
-        dataset_type=fo.types.YOLOv5Dataset,  # also works for YOLOv8
-        label_field=label_field,
-        overwrite=True,
-    )
-
-
-'''
-def _copy_local_file(src, dst):
-    """
-    Minimal local file copy. If your `dst` is a cloud path, you must
-    implement your own upload logic via boto3, GCS library, etc.
-    """
-    # If the user typed something like s3://..., you'd handle that differently
-    if dst.startswith("s3://") or dst.startswith("gs://"):
-        fos.copy_files(src, dst)
-    else:
-        raise NotImplementedError(
-            "Encountered a path for which logic hasn't been implemented"
-        )
-        
-    shutil.copy(src, dst)
-'''
 
 def export_yolo_data(
-    samples, 
-    export_dir, 
-    classes, 
-    label_field = "ground_truth", 
-    split = None
-    ):
+    samples, export_dir, classes, label_field="ground_truth", split=None
+):
 
     if type(split) == list:
         splits = split
         for split in splits:
-            export_yolo_data(
-                samples, 
-                export_dir, 
-                classes, 
-                label_field, 
-                split
-            )   
+            export_yolo_data(samples, export_dir, classes, label_field, split)
     else:
         if split is None:
             split_view = samples
@@ -374,5 +417,5 @@ def export_yolo_data(
             dataset_type=fo.types.YOLOv5Dataset,
             label_field=label_field,
             classes=classes,
-            split=split
+            split=split,
         )
